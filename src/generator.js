@@ -391,8 +391,9 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
 
     /* Sidebar */
     aside.file-sidebar {
-      width: var(--sidebar-width);
-      min-width: var(--sidebar-width);
+      width: var(--sidebar-width, 320px);
+      min-width: 200px;
+      max-width: 75vw;
       background-color: var(--bg-panel);
       border-right: 1px solid var(--border-default);
       display: flex;
@@ -401,12 +402,42 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
       position: sticky;
       top: 96px;
       overflow: hidden;
-      transition: width 0.2s ease, min-width 0.2s ease;
+      flex-shrink: 0;
     }
     aside.file-sidebar.collapsed {
-      width: 0;
-      min-width: 0;
-      border-right: none;
+      display: none;
+    }
+    aside.file-sidebar.collapsed + .sidebar-resizer {
+      display: none;
+    }
+
+    /* Resizer Divider Bar */
+    .sidebar-resizer {
+      width: 6px;
+      margin-left: -3px;
+      margin-right: -3px;
+      cursor: col-resize;
+      background-color: transparent;
+      position: relative;
+      z-index: 50;
+      flex-shrink: 0;
+      transition: background-color 0.15s ease;
+      user-select: none;
+    }
+    .sidebar-resizer:hover,
+    .sidebar-resizer.is-resizing {
+      background-color: var(--accent-blue);
+    }
+    body.is-resizing {
+      cursor: col-resize !important;
+      user-select: none !important;
+    }
+    body.is-resizing * {
+      user-select: none !important;
+      pointer-events: none !important;
+    }
+    body.is-resizing .sidebar-resizer {
+      pointer-events: auto !important;
     }
 
     .sidebar-header {
@@ -818,7 +849,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
 
       <ul id="file-tree-list" class="file-tree-list">
         ${stats.files.map((file, idx) => `
-          <li class="file-tree-item" data-file-index="${idx}" data-filename="${escapeHtml(file.name)}">
+          <li class="file-tree-item" data-file-index="${idx}" data-filename="${escapeHtml(file.name)}" title="${escapeHtml(file.name)}">
             <input type="checkbox" class="file-reviewed-checkbox" title="Mark as reviewed">
             <span class="file-status-badge status-${file.status}">${file.status}</span>
             <span class="file-tree-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
@@ -830,6 +861,9 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
         `).join('')}
       </ul>
     </aside>
+
+    <!-- Resizer Handle -->
+    <div id="sidebar-resizer" class="sidebar-resizer" title="Drag to resize sidebar (double-click to reset)"></div>
 
     <!-- Content Canvas -->
     <section class="content-canvas">
@@ -992,9 +1026,68 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
         renderDiffs('line-by-line');
       };
 
+      // Resizable Sidebar Controller
+      const sidebar = document.getElementById('file-sidebar');
+      const resizer = document.getElementById('sidebar-resizer');
+      const DEFAULT_SIDEBAR_WIDTH = 320;
+
+      // Restore saved width from localStorage
+      try {
+        const savedWidth = parseInt(localStorage.getItem('mr-viewer-sidebar-width'), 10);
+        if (savedWidth && savedWidth >= 180 && savedWidth <= window.innerWidth * 0.75) {
+          sidebar.style.width = savedWidth + 'px';
+        }
+      } catch (e) {}
+
+      let isDragging = false;
+      let startX = 0;
+      let startWidth = 0;
+
+      resizer.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        startX = e.clientX;
+        startWidth = sidebar.getBoundingClientRect().width;
+        document.body.classList.add('is-resizing');
+        resizer.classList.add('is-resizing');
+        e.preventDefault();
+      });
+
+      document.addEventListener('mousemove', (e) => {
+        if (!isDragging) return;
+        const diff = e.clientX - startX;
+        let newWidth = startWidth + diff;
+        const minW = 200;
+        const maxW = Math.floor(window.innerWidth * 0.75);
+        if (newWidth < minW) newWidth = minW;
+        if (newWidth > maxW) newWidth = maxW;
+
+        sidebar.style.width = newWidth + 'px';
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (!isDragging) return;
+        isDragging = false;
+        document.body.classList.remove('is-resizing');
+        resizer.classList.remove('is-resizing');
+        try {
+          const currentW = parseInt(sidebar.style.width, 10);
+          if (currentW) {
+            localStorage.setItem('mr-viewer-sidebar-width', currentW);
+          }
+        } catch (e) {}
+      });
+
+      // Double-click resizer to reset to default 320px
+      resizer.addEventListener('dblclick', () => {
+        sidebar.style.width = DEFAULT_SIDEBAR_WIDTH + 'px';
+        try {
+          localStorage.setItem('mr-viewer-sidebar-width', DEFAULT_SIDEBAR_WIDTH);
+        } catch (e) {}
+      });
+
       // Toggle Sidebar
       document.getElementById('btn-toggle-sidebar').onclick = () => {
-        document.getElementById('file-sidebar').classList.toggle('collapsed');
+        sidebar.classList.toggle('collapsed');
       };
 
       // Tab Switching
