@@ -9,7 +9,7 @@ GitHub Repository: [https://github.com/JonathanGunawan30/gitlab-viewer](https://
 
 ---
 
-## ⚡ Key Features
+## Key Features
 
 - **Crystal-Clear & Detailed Highlighting**:
   - Word-level and character-level diff highlighting (modifications stand out with crisp contrast).
@@ -32,7 +32,7 @@ GitHub Repository: [https://github.com/JonathanGunawan30/gitlab-viewer](https://
 
 ---
 
-## 📦 Installation
+## Installation
 
 Clone the repository from GitHub and install/link it globally:
 
@@ -47,7 +47,7 @@ Once linked, both the `mr-view` and `gitlab-viewer` commands will be available g
 
 ---
 
-## 🚀 Usage
+## Usage
 
 ### 1. Save Your Personal Access Token (One-Time Setup)
 
@@ -93,7 +93,7 @@ mr-view
 
 ---
 
-## ⚙️ Additional Options
+## Additional Options
 
 ```bash
 # Temporarily override token for a single execution
@@ -111,7 +111,7 @@ mr-view https://gitlab.company.domain/... -h https://gitlab.company.domain
 
 ---
 
-## 🔒 Privacy & Security
+## Privacy & Security
 
 - **Required Token Scopes**: Minimal scopes needed are `read_api` (or `api`) and `read_repository`.
 - **Private Package**: `"private": true` is set in `package.json` to prevent accidental publication to public package registries.
@@ -119,6 +119,6 @@ mr-view https://gitlab.company.domain/... -h https://gitlab.company.domain
 
 ---
 
-## 📄 License
+## License
 
 This project is dedicated to the public domain under the [Unlicense](LICENSE) - see the [LICENSE](LICENSE) file for details.
