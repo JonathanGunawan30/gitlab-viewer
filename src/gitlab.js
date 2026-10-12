@@ -55,7 +55,7 @@ export function convertChangesToUnifiedDiff(changes) {
 }
 
 /**
- * Fetches all merge request data (info, diffs, discussions, and full file contents for context expansion).
+ * Fetches all merge request data (info, diffs, discussions).
  * 
  * @param {object} params
  * @param {string} params.host
@@ -151,70 +151,10 @@ export async function fetchMergeRequestData({ host, projectEncoded, mrIid, token
     // ignore
   }
 
-  // 4. Fetch Full File Contents for Context Expansion (Enables viewing code above/below & full files)
-  const fileContents = {};
-  const baseSha = mrData.diff_refs?.base_sha || mrData.target_branch;
-  const headSha = mrData.diff_refs?.head_sha || mrData.source_branch;
-
-  if (changesList.length > 0 && (baseSha || headSha)) {
-    if (typeof onProgress === 'function') {
-      onProgress('Fetching full file contexts for lines expansion...');
-    }
-
-    const fetchTasks = changesList.map(async (change) => {
-      const filePath = change.new_path || change.old_path;
-      fileContents[filePath] = {
-        oldPath: change.old_path,
-        newPath: change.new_path,
-        isNew: Boolean(change.new_file),
-        isDeleted: Boolean(change.deleted_file),
-        isRenamed: Boolean(change.renamed_file),
-        diffChunk: change.diff || '',
-        baseContent: null,
-        headContent: null
-      };
-
-      const promises = [];
-
-      // Fetch base content (before changes) if not a brand-new file
-      if (!change.new_file && baseSha && change.old_path) {
-        promises.push(
-          client.get(
-            `${host.replace(/\/+$/, '')}/api/v4/projects/${projectEncoded}/repository/files/${encodeURIComponent(change.old_path)}/raw`,
-            { params: { ref: baseSha }, responseType: 'text', timeout: 15000 }
-          ).then(res => {
-            if (typeof res.data === 'string' && res.data.length < 2000000) {
-              fileContents[filePath].baseContent = res.data;
-            }
-          }).catch(() => {})
-        );
-      }
-
-      // Fetch head content (after changes) if not a deleted file
-      if (!change.deleted_file && headSha && change.new_path) {
-        promises.push(
-          client.get(
-            `${host.replace(/\/+$/, '')}/api/v4/projects/${projectEncoded}/repository/files/${encodeURIComponent(change.new_path)}/raw`,
-            { params: { ref: headSha }, responseType: 'text', timeout: 15000 }
-          ).then(res => {
-            if (typeof res.data === 'string' && res.data.length < 2000000) {
-              fileContents[filePath].headContent = res.data;
-            }
-          }).catch(() => {})
-        );
-      }
-
-      await Promise.allSettled(promises);
-    });
-
-    await Promise.allSettled(fetchTasks);
-  }
-
   return {
     mr: mrData,
     rawDiff,
     changes: changesList,
-    discussions,
-    fileContents
+    discussions
   };
 }

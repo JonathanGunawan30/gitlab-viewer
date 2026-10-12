@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import path from 'node:path';
 import { createRequire } from 'node:module';
 import { marked } from 'marked';
 import * as Diff2Html from 'diff2html';
@@ -10,12 +9,6 @@ const require = createRequire(import.meta.url);
 const DIFF2HTML_CSS = fs.readFileSync(require.resolve('diff2html/bundles/css/diff2html.min.css'), 'utf8');
 const DIFF2HTML_JS = fs.readFileSync(require.resolve('diff2html/bundles/js/diff2html-ui.min.js'), 'utf8');
 const HLJS_DARK_CSS = fs.readFileSync(require.resolve('highlight.js/styles/github-dark.min.css'), 'utf8');
-
-// Resolve jsdiff bundle (30 KB) for client-side context expansion (full file / lines above / below)
-const mainDiffPath = require.resolve('diff');
-const diffDir = path.dirname(path.dirname(mainDiffPath));
-const diffMinJsPath = path.join(diffDir, 'dist', 'diff.min.js');
-const JSDIFF_JS = fs.existsSync(diffMinJsPath) ? fs.readFileSync(diffMinJsPath, 'utf8') : '';
 
 // Configure marked
 marked.setOptions({
@@ -93,17 +86,16 @@ export function calculateStats(rawDiff, changes = []) {
 }
 
 /**
- * Generates the complete, self-contained standalone HTML viewer with interactive context expansion.
+ * Generates the complete, self-contained standalone HTML viewer.
  * 
  * @param {object} options
  * @param {any} options.mr
  * @param {string} options.rawDiff
  * @param {Array<any>} options.changes
  * @param {Array<any>} options.discussions
- * @param {Record<string, any>} [options.fileContents]
  * @returns {string} Standalone HTML content
  */
-export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = [], fileContents = {} }) {
+export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = [] }) {
   const stats = calculateStats(rawDiff, changes);
   const descriptionHtml = mr.description 
     ? marked.parse(mr.description) 
@@ -692,7 +684,6 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
     }
     .d2h-ins ins {
       background-color: rgba(46, 160, 67, 0.45) !important;
-      color: #b4f7bc !important;
       border-radius: 3px !important;
       text-decoration: none !important;
       padding: 1px 3px !important;
@@ -715,7 +706,6 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
     }
     .d2h-del del {
       background-color: rgba(248, 81, 73, 0.45) !important;
-      color: #ffdcd7 !important;
       border-radius: 3px !important;
       text-decoration: line-through !important;
       padding: 1px 3px !important;
@@ -748,34 +738,6 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
       color: var(--text-main);
       border-color: var(--accent-blue);
     }
-    .file-actions-btn.active-context {
-      background-color: rgba(88, 166, 255, 0.15);
-      border-color: var(--accent-blue);
-      color: var(--accent-blue);
-      font-weight: 600;
-    }
-
-    /* Chunk Expand Helper */
-    .chunk-expand-bar {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-left: 12px;
-    }
-    .chunk-expand-btn {
-      background: rgba(255, 255, 255, 0.06);
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 3px;
-      color: #79c0ff;
-      font-size: 10px;
-      padding: 1px 6px;
-      cursor: pointer;
-      font-family: inherit;
-    }
-    .chunk-expand-btn:hover {
-      background: rgba(88, 166, 255, 0.2);
-      border-color: #79c0ff;
-    }
   </style>
 </head>
 <body>
@@ -790,13 +752,6 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
       </div>
 
       <div class="actions-area">
-        <!-- Global Context Selector: Compact vs +20 Lines vs Full File -->
-        <div class="btn-group" title="Adjust surrounding code context">
-          <button id="btn-context-compact" class="btn active" title="Show standard compact diff (3 lines of context)">Compact</button>
-          <button id="btn-context-20" class="btn" title="Expand 20 lines of context above and below changes">+20 Lines</button>
-          <button id="btn-context-full" class="btn" title="Show entire files (all lines) with diff highlights">Full Files</button>
-        </div>
-
         <div class="btn-group">
           <button id="btn-side-by-side" class="btn active" title="Side-by-Side (Split) View">Split</button>
           <button id="btn-line-by-line" class="btn" title="Unified (Inline) View">Unified</button>
@@ -917,11 +872,6 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
     </section>
   </main>
 
-  <!-- Embedded JSDiff Library for Client-Side Context Expansion -->
-  <script>
-    ${JSDIFF_JS}
-  </script>
-
   <!-- Embedded Diff2Html Standalone Script -->
   <script>
     ${DIFF2HTML_JS}
@@ -931,105 +881,40 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
   <script>
     (function () {
       const defaultRawDiff = ${safeJson(rawDiff)};
-      const fileContentsMap = ${safeJson(fileContents)};
       const filesMeta = ${safeJson(stats.files)};
 
       let currentOutputFormat = 'side-by-side';
-      let currentGlobalContext = 3; // 3, 20, or 999999 (full file)
-      const perFileContextMap = {}; // filePath -> context number
       let diffUiInstance = null;
 
-      /**
-       * Builds unified diff dynamically using jsdiff based on requested context lines.
-       */
-      function buildDiffString() {
-        // If Diff library is not loaded or no full file contents available, fallback to default
-        if (typeof Diff === 'undefined' || !Diff.createTwoFilesPatch || Object.keys(fileContentsMap).length === 0) {
-          return defaultRawDiff;
-        }
-
-        const patches = [];
-
-        for (const meta of filesMeta) {
-          const filePath = meta.name;
-          const fileData = fileContentsMap[filePath];
-
-          // Determine context for this specific file
-          const contextLines = perFileContextMap[filePath] !== undefined 
-            ? perFileContextMap[filePath] 
-            : currentGlobalContext;
-
-          if (fileData && fileData.baseContent !== null && fileData.headContent !== null) {
-            // Modified file with both base and head available
-            const patch = Diff.createTwoFilesPatch(
-              fileData.oldPath || filePath,
-              fileData.newPath || filePath,
-              fileData.baseContent,
-              fileData.headContent,
-              '',
-              '',
-              { context: contextLines }
-            );
-            patches.push(patch);
-          } else if (fileData && fileData.headContent !== null && fileData.isNew) {
-            // New file
-            const patch = Diff.createTwoFilesPatch(
-              '/dev/null',
-              fileData.newPath || filePath,
-              '',
-              fileData.headContent,
-              '',
-              '',
-              { context: contextLines }
-            );
-            patches.push(patch);
-          } else if (fileData && fileData.baseContent !== null && fileData.isDeleted) {
-            // Deleted file
-            const patch = Diff.createTwoFilesPatch(
-              fileData.oldPath || filePath,
-              '/dev/null',
-              fileData.baseContent,
-              '',
-              '',
-              '',
-              { context: contextLines }
-            );
-            patches.push(patch);
-          } else if (fileData && fileData.diffChunk) {
-            // Fallback to GitLab diff chunk
-            patches.push('diff --git a/' + (meta.oldName || filePath) + ' b/' + (meta.newName || filePath) + '\\n' + fileData.diffChunk);
-          }
-        }
-
-        return patches.length > 0 ? patches.join('\\n') : defaultRawDiff;
-      }
-
-      // Pure Dark Mode Diff Rendering
+      // Pure Dark Mode Diff Rendering with Syntax Highlighting
       function renderDiffs(format) {
         const container = document.getElementById('diff-output-container');
         container.innerHTML = '';
 
-        const activeDiff = buildDiffString();
-
-        if (!activeDiff || activeDiff.trim().length === 0) {
+        if (!defaultRawDiff || defaultRawDiff.trim().length === 0) {
           container.innerHTML = '<div style="padding: 40px; text-align: center; color: var(--text-dim);">No changes found in this Merge Request.</div>';
           return;
         }
 
-        diffUiInstance = new Diff2HtmlUI(container, activeDiff, {
+        diffUiInstance = new Diff2HtmlUI(container, defaultRawDiff, {
           drawFileList: false,
           matching: 'words',
           outputFormat: format,
           colorScheme: 'dark',
           highlight: true,
-          renderNothingWhenEmpty: false
+          renderNothingWhenEmpty: false,
+          highlightLanguages: {
+            'php': 'php',
+            'phtml': 'php',
+            'blade.php': 'php',
+            'inc': 'php'
+          }
         });
 
         diffUiInstance.draw();
         diffUiInstance.highlightCode();
 
         enhanceFileHeaders();
-        enhanceHunkHeaders();
       }
 
       function enhanceFileHeaders() {
@@ -1038,47 +923,16 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
           const header = wrapper.querySelector('.d2h-file-header');
           if (!header) return;
 
+          if (header.querySelector('.file-actions-container')) return;
+
           const fileNameEl = wrapper.querySelector('.d2h-file-name');
           const fileName = fileNameEl ? fileNameEl.innerText.trim() : (filesMeta[index]?.name || '');
-          const hasFullContent = Boolean(fileContentsMap[fileName] && fileContentsMap[fileName].headContent !== null);
 
           const actionContainer = document.createElement('div');
+          actionContainer.className = 'file-actions-container';
           actionContainer.style.display = 'flex';
           actionContainer.style.gap = '8px';
           actionContainer.style.alignItems = 'center';
-
-          // Per-File Full Context Toggle Button
-          if (hasFullContent && typeof Diff !== 'undefined') {
-            const currentContext = perFileContextMap[fileName] !== undefined ? perFileContextMap[fileName] : currentGlobalContext;
-            const isFullFile = currentContext >= 99999;
-
-            const fullFileBtn = document.createElement('button');
-            fullFileBtn.className = 'file-actions-btn' + (isFullFile ? ' active-context' : '');
-            fullFileBtn.innerText = isFullFile ? '⊟ Compact' : '📄 Full File';
-            fullFileBtn.title = isFullFile ? 'Switch back to compact diff' : 'Show entire file with diff in context';
-            fullFileBtn.onclick = function (e) {
-              e.stopPropagation();
-              perFileContextMap[fileName] = isFullFile ? 3 : 999999;
-              renderDiffs(currentOutputFormat);
-            };
-            actionContainer.appendChild(fullFileBtn);
-          }
-
-          // Collapse Button
-          const collapseBtn = document.createElement('button');
-          collapseBtn.className = 'file-actions-btn';
-          collapseBtn.innerText = 'Collapse';
-          collapseBtn.onclick = function (e) {
-            e.stopPropagation();
-            const diffContent = wrapper.querySelector('.d2h-file-diff');
-            if (diffContent.style.display === 'none') {
-              diffContent.style.display = '';
-              collapseBtn.innerText = 'Collapse';
-            } else {
-              diffContent.style.display = 'none';
-              collapseBtn.innerText = 'Expand';
-            }
-          };
 
           // Copy Path Button
           const copyPathBtn = document.createElement('button');
@@ -1094,73 +948,29 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
             }
           };
 
+          // Collapse Button
+          const collapseBtn = document.createElement('button');
+          collapseBtn.className = 'file-actions-btn';
+          collapseBtn.innerText = 'Collapse';
+          collapseBtn.onclick = function (e) {
+            e.stopPropagation();
+            const diffContent = wrapper.querySelector('.d2h-file-diff');
+            if (diffContent) {
+              if (diffContent.style.display === 'none') {
+                diffContent.style.display = '';
+                collapseBtn.innerText = 'Collapse';
+              } else {
+                diffContent.style.display = 'none';
+                collapseBtn.innerText = 'Expand';
+              }
+            }
+          };
+
           actionContainer.appendChild(copyPathBtn);
           actionContainer.appendChild(collapseBtn);
           header.appendChild(actionContainer);
         });
       }
-
-      function enhanceHunkHeaders() {
-        const infoHeaders = document.querySelectorAll('.d2h-info');
-        infoHeaders.forEach(infoEl => {
-          // Avoid duplicate controls
-          if (infoEl.querySelector('.chunk-expand-bar')) return;
-          const wrapper = infoEl.closest('.d2h-file-wrapper');
-          if (!wrapper) return;
-
-          const fileNameEl = wrapper.querySelector('.d2h-file-name');
-          const fileName = fileNameEl ? fileNameEl.innerText.trim() : '';
-          const hasFullContent = Boolean(fileContentsMap[fileName] && fileContentsMap[fileName].headContent !== null);
-          if (!hasFullContent || typeof Diff === 'undefined') return;
-
-          const expandBar = document.createElement('span');
-          expandBar.className = 'chunk-expand-bar';
-
-          const btn20 = document.createElement('button');
-          btn20.className = 'chunk-expand-btn';
-          btn20.innerText = '↕ +20 Lines';
-          btn20.title = 'Expand 20 surrounding lines for this file';
-          btn20.onclick = (e) => {
-            e.stopPropagation();
-            const current = perFileContextMap[fileName] || currentGlobalContext;
-            perFileContextMap[fileName] = current + 20;
-            renderDiffs(currentOutputFormat);
-          };
-
-          const btnAll = document.createElement('button');
-          btnAll.className = 'chunk-expand-btn';
-          btnAll.innerText = '📄 Show All';
-          btnAll.title = 'Show entire file with all lines';
-          btnAll.onclick = (e) => {
-            e.stopPropagation();
-            perFileContextMap[fileName] = 999999;
-            renderDiffs(currentOutputFormat);
-          };
-
-          expandBar.appendChild(btn20);
-          expandBar.appendChild(btnAll);
-          infoEl.appendChild(expandBar);
-        });
-      }
-
-      // Global Context Switcher Buttons
-      const btnContextCompact = document.getElementById('btn-context-compact');
-      const btnContext20 = document.getElementById('btn-context-20');
-      const btnContextFull = document.getElementById('btn-context-full');
-
-      function setGlobalContext(ctx, activeBtn) {
-        currentGlobalContext = ctx;
-        // Reset per-file overrides when global context is explicitly set
-        for (const k in perFileContextMap) delete perFileContextMap[k];
-
-        [btnContextCompact, btnContext20, btnContextFull].forEach(b => b.classList.remove('active'));
-        activeBtn.classList.add('active');
-        renderDiffs(currentOutputFormat);
-      }
-
-      btnContextCompact.onclick = () => setGlobalContext(3, btnContextCompact);
-      btnContext20.onclick = () => setGlobalContext(20, btnContext20);
-      btnContextFull.onclick = () => setGlobalContext(999999, btnContextFull);
 
       // Format toggling (Split vs Unified)
       const btnSideBySide = document.getElementById('btn-side-by-side');
