@@ -1,7 +1,7 @@
 # GitLab MR Diff Viewer (CLI)
 
 [![GitHub](https://img.shields.io/badge/GitHub-JonathanGunawan30%2Fgitlab--viewer-blue?logo=github)](https://github.com/JonathanGunawan30/gitlab-viewer)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Unlicense](https://img.shields.io/badge/License-Unlicense-blue.svg)](https://unlicense.org/)
 
 > **Ultra-lightweight private GitLab Merge Request diff viewer** featuring crystal-clear highlighting, zero server overhead, and 100% local privacy.
 
@@ -121,4 +121,4 @@ mr-view https://gitlab.company.domain/... -h https://gitlab.company.domain
 
 ## 📄 License
 
-This project is licensed under the [MIT License](https://opensource.org/licenses/MIT).
+This project is dedicated to the public domain under the [Unlicense](LICENSE) - see the [LICENSE](LICENSE) file for details.
