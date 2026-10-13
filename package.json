@@ -1,6 +1,6 @@
 {
   "name": "gitlab-viewer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Ultra-lightweight private GitLab MR diff viewer CLI with zero server overhead",
   "private": true,
   "type": "module",
