@@ -1,4 +1,7 @@
+import fs from 'node:fs';
 import axios from 'axios';
+
+const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 /**
  * Creates an Axios instance with proper headers and error handling.
@@ -9,7 +12,7 @@ function createClient(token) {
   return axios.create({
     headers: {
       'PRIVATE-TOKEN': token,
-      'User-Agent': 'GitLab-Viewer-CLI/1.0'
+      'User-Agent': `GitLab-Viewer-CLI/${pkg.version || '1.0.0'}`
     },
     timeout: 30000
   });
@@ -54,6 +57,146 @@ export function convertChangesToUnifiedDiff(changes) {
   }).join('\n');
 }
 
+const MAX_PAGES = 200;
+
+/**
+ * Fetches all discussion notes across all pages.
+ * @param {import('axios').AxiosInstance} client
+ * @param {string} apiBase
+ * @param {function} [onProgress]
+ * @returns {Promise<{ discussions: Array<any>, hasPartialDiscussions: boolean }>}
+ */
+export async function fetchAllDiscussions(client, apiBase, onProgress) {
+  const discussions = [];
+  let page = 1;
+  let hasMore = true;
+  let hasPartialDiscussions = false;
+
+  while (hasMore && page <= MAX_PAGES) {
+    try {
+      onProgress?.(`Fetching discussions (page ${page})...`);
+      const discRes = await client.get(`${apiBase}/discussions`, {
+        params: { per_page: 100, page }
+      });
+      const batch = discRes.data || [];
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      discussions.push(...batch);
+
+      const nextPage = discRes.headers?.['x-next-page'];
+      if (nextPage && nextPage.trim()) {
+        page = parseInt(nextPage, 10);
+      } else if (batch.length < 100) {
+        hasMore = false;
+      } else {
+        page++;
+      }
+    } catch {
+      if (discussions.length > 0 || page > 1) {
+        hasPartialDiscussions = true;
+      }
+      break;
+    }
+  }
+
+  if (page > MAX_PAGES && hasMore) {
+    hasPartialDiscussions = true;
+  }
+
+  return { discussions, hasPartialDiscussions };
+}
+
+/**
+ * Fetches MR diff data using raw_diffs, paginated /diffs, or legacy /changes fallback.
+ * @param {import('axios').AxiosInstance} client
+ * @param {string} apiBase
+ * @param {object} mrData
+ * @param {function} [onProgress]
+ * @returns {Promise<{ rawDiff: string, changes: Array<any>, hasOverflow: boolean }>}
+ */
+export async function fetchDiffsData(client, apiBase, mrData, onProgress) {
+  let rawDiff = '';
+  let changesList = [];
+  let hasOverflow = Boolean(
+    mrData?.overflow ||
+    (typeof mrData?.changes_count === 'string' && mrData.changes_count.includes('+'))
+  );
+
+  onProgress?.('Fetching raw diffs...');
+  try {
+    const rawRes = await client.get(`${apiBase}/raw_diffs`, { responseType: 'text' });
+    if (typeof rawRes.data === 'string' && rawRes.data.trim().length > 0) {
+      rawDiff = rawRes.data;
+      if (rawDiff.includes('Diffs were truncated') || rawDiff.includes('diff too large')) {
+        hasOverflow = true;
+      }
+    }
+  } catch {
+    // /raw_diffs endpoint unavailable or failed
+  }
+
+  // If raw_diffs succeeded, return immediately
+  if (rawDiff) {
+    return { rawDiff, changes: changesList, hasOverflow };
+  }
+
+  // If raw_diffs unavailable, fetch all pages from /diffs with MAX_PAGES guard
+  try {
+    let page = 1;
+    let hasMore = true;
+    while (hasMore && page <= MAX_PAGES) {
+      onProgress?.(`Fetching diffs (page ${page})...`);
+      const diffsRes = await client.get(`${apiBase}/diffs`, {
+        params: { per_page: 100, page }
+      });
+      const batch = diffsRes.data || [];
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      changesList.push(...batch);
+
+      for (const item of batch) {
+        if (item.too_large || item.collapsed) {
+          hasOverflow = true;
+        }
+      }
+
+      const nextPage = diffsRes.headers?.['x-next-page'];
+      if (nextPage && nextPage.trim()) {
+        page = parseInt(nextPage, 10);
+      } else if (batch.length < 100) {
+        hasMore = false;
+      } else {
+        page++;
+      }
+    }
+
+    if (page > MAX_PAGES && hasMore) {
+      hasOverflow = true;
+    }
+
+    if (changesList.length > 0) {
+      rawDiff = convertChangesToUnifiedDiff(changesList);
+    }
+  } catch {
+    // Fallback to /changes for older GitLab instances
+    try {
+      onProgress?.('Fetching changes fallback...');
+      const changesRes = await client.get(`${apiBase}/changes`, {
+        params: { access_raw_diffs: true }
+      });
+      if (changesRes.data && Array.isArray(changesRes.data.changes)) {
+        changesList = changesRes.data.changes;
+        rawDiff = convertChangesToUnifiedDiff(changesList);
+        if (changesRes.data.overflow) {
+          hasOverflow = true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return { rawDiff, changes: changesList, hasOverflow };
+}
+
 /**
  * Fetches all merge request data (info, diffs, discussions).
  * 
@@ -66,10 +209,12 @@ export function convertChangesToUnifiedDiff(changes) {
  */
 export async function fetchMergeRequestData({ host, projectEncoded, mrIid, token, onProgress }) {
   const client = createClient(token);
-  const apiBase = `${host.replace(/\/+$/, '')}/api/v4/projects/${projectEncoded}/merge_requests/${mrIid}`;
+  const cleanHost = host.replace(/\/+$/, '');
+  const apiBase = `${cleanHost}/api/v4/projects/${projectEncoded}/merge_requests/${mrIid}`;
 
   // 1. Fetch MR Details
   let mrData;
+  onProgress?.(`Connecting to ${cleanHost} for MR !${mrIid}...`);
   try {
     const res = await client.get(apiBase);
     mrData = res.data;
@@ -94,67 +239,47 @@ export async function fetchMergeRequestData({ host, projectEncoded, mrIid, token
         'Your token does not have permission to access this Merge Request.'
       );
     }
-    throw new Error(`GitLab API Error: ${err.message} (${err.response?.status || 'network error'})`);
-  }
-
-  // 2. Fetch Changes / Diffs
-  let rawDiff = '';
-  let changesList = [];
-
-  try {
-    const rawRes = await client.get(`${apiBase}/raw_diff`, { responseType: 'text' });
-    if (typeof rawRes.data === 'string' && rawRes.data.trim().length > 0) {
-      rawDiff = rawRes.data;
+    const sslCodes = [
+      'SELF_SIGNED_CERT_IN_CHAIN',
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+      'DEPTH_ZERO_SELF_SIGNED_CERT',
+      'CERT_HAS_EXPIRED'
+    ];
+    if (sslCodes.includes(err.code)) {
+      throw new Error(
+        `GitLab SSL Certificate Error (${err.code}).\n` +
+        'If using self-hosted GitLab with an internal/custom CA, set the NODE_EXTRA_CA_CERTS environment variable.'
+      );
     }
-  } catch {
-    // fallback if raw_diff is unavailable
+    if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT') {
+      throw new Error(
+        `GitLab Request Timeout (${err.code}): The request to "${cleanHost}" timed out after 30 seconds.\n` +
+        'Please check your network connection or VPN.'
+      );
+    }
+    if (err.code === 'ENOTFOUND') {
+      throw new Error(`GitLab Host Error: Cannot resolve domain "${cleanHost}". Please check your internet connection or host URL.`);
+    }
+    if (err.code === 'ECONNREFUSED') {
+      throw new Error(`GitLab Connection Refused: Could not connect to "${cleanHost}".`);
+    }
+    throw new Error(`GitLab API Error: ${err.message} (${err.response?.status || err.code || 'network error'})`);
   }
 
-  try {
-    const changesRes = await client.get(`${apiBase}/changes`);
-    if (changesRes.data && Array.isArray(changesRes.data.changes)) {
-      changesList = changesRes.data.changes;
-      if (!rawDiff) {
-        rawDiff = convertChangesToUnifiedDiff(changesList);
-      }
-    }
-  } catch {
-    try {
-      let page = 1;
-      let hasMore = true;
-      while (hasMore && page <= 5) {
-        const diffsRes = await client.get(`${apiBase}/diffs`, {
-          params: { per_page: 100, page }
-        });
-        const batch = diffsRes.data || [];
-        if (batch.length === 0) break;
-        changesList.push(...batch);
-        if (batch.length < 100) hasMore = false;
-        page++;
-      }
-      if (!rawDiff && changesList.length > 0) {
-        rawDiff = convertChangesToUnifiedDiff(changesList);
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  // 3. Fetch Discussions (Comments / Notes)
-  let discussions = [];
-  try {
-    const discRes = await client.get(`${apiBase}/discussions`, {
-      params: { per_page: 100 }
-    });
-    discussions = discRes.data || [];
-  } catch {
-    // ignore
-  }
+  // 2. Fetch Diffs and Discussions in parallel
+  onProgress?.('Fetching diffs and discussions in parallel...');
+  const [diffResult, discussionsResult] = await Promise.all([
+    fetchDiffsData(client, apiBase, mrData, onProgress),
+    fetchAllDiscussions(client, apiBase, onProgress)
+  ]);
 
   return {
     mr: mrData,
-    rawDiff,
-    changes: changesList,
-    discussions
+    rawDiff: diffResult.rawDiff,
+    changes: diffResult.changes,
+    hasOverflow: diffResult.hasOverflow,
+    discussions: discussionsResult.discussions,
+    hasPartialDiscussions: discussionsResult.hasPartialDiscussions
   };
 }

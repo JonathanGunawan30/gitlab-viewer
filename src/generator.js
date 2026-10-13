@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { marked } from 'marked';
+import sanitizeHtml from 'sanitize-html';
 import * as Diff2Html from 'diff2html';
 
 const require = createRequire(import.meta.url);
@@ -15,6 +16,112 @@ marked.setOptions({
   gfm: true,
   breaks: true
 });
+
+function createSanitizeOptions(baseUrl = '') {
+  let projectBase = '';
+  let origin = '';
+  if (baseUrl) {
+    try {
+      const u = new URL(baseUrl);
+      origin = u.origin;
+      const mrIndex = u.pathname.indexOf('/-/merge_requests/');
+      if (mrIndex !== -1) {
+        projectBase = u.origin + u.pathname.slice(0, mrIndex) + '/';
+      } else {
+        const altIndex = u.pathname.indexOf('/merge_requests/');
+        if (altIndex !== -1) {
+          projectBase = u.origin + u.pathname.slice(0, altIndex) + '/';
+        } else {
+          projectBase = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    allowedTags: [
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'p', 'a', 'ul', 'ol',
+      'nl', 'li', 'b', 'i', 'strong', 'em', 'strike', 'code', 'hr', 'br', 'div',
+      'table', 'thead', 'caption', 'tbody', 'tr', 'th', 'td', 'pre', 'span',
+      'img', 'del', 'sup', 'sub', 'details', 'summary', 'input'
+    ],
+    allowedAttributes: {
+      a: ['href', 'name', 'target', 'rel'],
+      img: ['src', 'alt', 'title', 'width', 'height'],
+      input: ['type', 'checked', 'disabled'],
+      span: ['class', 'style'],
+      div: ['class'],
+      code: ['class'],
+      pre: ['class'],
+      th: ['align', 'colspan', 'rowspan'],
+      td: ['align', 'colspan', 'rowspan']
+    },
+    allowedSchemes: ['http', 'https', 'mailto'],
+    allowedSchemesByTag: {
+      img: ['http', 'https', 'data']
+    },
+    transformTags: {
+      'a': (tagName, attribs) => {
+        const cleanHref = (attribs.href || '').trim();
+        if (/^(javascript|vbscript|data):/i.test(cleanHref)) {
+          delete attribs.href;
+        }
+        return {
+          tagName: 'a',
+          attribs: {
+            ...attribs,
+            target: '_blank',
+            rel: 'noopener noreferrer'
+          }
+        };
+      },
+      'img': (tagName, attribs) => {
+        let src = (attribs.src || '').trim();
+        if (src.startsWith('/') && (projectBase || origin)) {
+          try {
+            if (src.startsWith('/uploads/') && projectBase) {
+              src = new URL(src.replace(/^\//, ''), projectBase).href;
+            } else if (origin) {
+              src = new URL(src, origin).href;
+            }
+          } catch {}
+        }
+        return {
+          tagName: 'img',
+          attribs: {
+            ...attribs,
+            src
+          }
+        };
+      },
+      'input': (tagName, attribs) => {
+        if (attribs.type === 'checkbox') {
+          return {
+            tagName: 'input',
+            attribs: {
+              type: 'checkbox',
+              disabled: 'disabled',
+              ...(attribs.checked !== undefined ? { checked: attribs.checked } : {})
+            }
+          };
+        }
+        return { tagName: 'span', attribs: {} };
+      }
+    }
+  };
+}
+
+/**
+ * Parses and sanitizes Markdown to prevent XSS attacks.
+ * @param {string} markdownText
+ * @param {string} [baseUrl] - Base URL (e.g. MR web_url) to resolve relative GitLab assets
+ * @returns {string}
+ */
+export function renderMarkdown(markdownText, baseUrl = '') {
+  if (!markdownText || typeof markdownText !== 'string') return '';
+  const rawHtml = marked.parse(markdownText);
+  return sanitizeHtml(rawHtml, createSanitizeOptions(baseUrl));
+}
 
 /**
  * Escapes string for safe JSON embedding in HTML script tag
@@ -97,8 +204,9 @@ export function calculateStats(rawDiff, changes = []) {
  */
 export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = [] }) {
   const stats = calculateStats(rawDiff, changes);
+  const baseUrl = mr.web_url || '';
   const descriptionHtml = mr.description 
-    ? marked.parse(mr.description) 
+    ? renderMarkdown(mr.description, baseUrl) 
     : '<p class="text-muted"><em>No description provided for this Merge Request.</em></p>';
 
   const formattedDiscussions = discussions
@@ -112,18 +220,30 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
           username: n.author.username,
           avatarUrl: n.author.avatar_url
         } : null,
-        bodyHtml: marked.parse(n.body || ''),
+        bodyHtml: renderMarkdown(n.body || '', baseUrl),
         createdAt: n.created_at,
         resolvable: n.resolvable,
         resolved: n.resolved
       }))
     }));
 
+  const isDraft = Boolean(mr.draft || mr.work_in_progress);
+  const badgeClass = isDraft ? 'draft' : (mr.state || 'opened');
+  const badgeLabels = {
+    draft: 'DRAFT',
+    opened: 'OPEN',
+    merged: 'MERGED',
+    closed: 'CLOSED',
+    locked: 'LOCKED'
+  };
+  const badgeLabel = isDraft ? 'DRAFT' : (badgeLabels[mr.state] || (mr.state || 'OPEN').toUpperCase());
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src https: http: data:;">
   <title>MR !${mr.iid}: ${escapeHtml(mr.title)} | GitLab Viewer</title>
   <style>
     /* Base Diff2Html Styles */
@@ -247,6 +367,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
     .badge-opened { background-color: #238636; color: #fff; }
     .badge-merged { background-color: #8957e5; color: #fff; }
     .badge-closed { background-color: #da3633; color: #fff; }
+    .badge-locked { background-color: #d29922; color: #fff; }
     .badge-draft { background-color: #484f58; color: #8b949e; }
 
     .mr-title {
@@ -776,7 +897,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
   <header class="top-bar">
     <div class="top-bar-row1">
       <div class="mr-title-area">
-        <span class="badge-status badge-${mr.state || 'opened'}">${mr.draft ? 'DRAFT' : (mr.state || 'OPEN')}</span>
+        <span class="badge-status badge-${badgeClass}">${badgeLabel}</span>
         <h1 class="mr-title">
           <span class="mr-iid">!${mr.iid}</span>${escapeHtml(mr.title)}
         </h1>

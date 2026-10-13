@@ -14,7 +14,7 @@ GitHub Repository: [https://github.com/JonathanGunawan30/gitlab-viewer](https://
 - **Crystal-Clear & Detailed Highlighting**:
   - Word-level and character-level diff highlighting (modifications stand out with crisp contrast).
   - Automatic syntax highlighting tailored to each programming language (TypeScript, JavaScript, Go, Python, Java, PHP, etc.).
-  - High-contrast Dark Mode (default) & Light Mode with a 1-click toggle.
+  - High-contrast Dark Mode featuring crystal-clear syntax and diff highlighting.
   - Side-by-Side (Split) & Line-by-Line (Unified) instant view toggle without page reload.
 - **Zero Server Overhead & 0 RAM in Background**:
   - No lingering Express server or background process keeping ports open.
@@ -106,7 +106,7 @@ mr-view https://gitlab.com/... -o ./review-mr-42.html
 mr-view https://gitlab.com/... --no-open
 
 # Specify custom GitLab host
-mr-view https://gitlab.company.domain/... -h https://gitlab.company.domain
+mr-view https://gitlab.company.domain/... -H https://gitlab.company.domain
 ```
 
 ---

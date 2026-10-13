@@ -14,12 +14,14 @@ import { parseGitLabInput } from '../src/parser.js';
 import { fetchMergeRequestData } from '../src/gitlab.js';
 import { generateViewerHtml, calculateStats } from '../src/generator.js';
 
+const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+
 const program = new Command();
 
 program
   .name('mr-view')
   .description('Ultra-lightweight private GitLab MR diff viewer CLI with zero server overhead')
-  .version('1.0.0');
+  .version(pkg.version);
 
 // ==========================================
 // Config Subcommands
@@ -64,7 +66,7 @@ configCmd
 program
   .argument('[url]', 'GitLab Merge Request URL or ref (e.g. https://gitlab.com/group/repo/-/merge_requests/42)')
   .option('-t, --token <token>', 'GitLab Personal Access Token (overrides saved config)')
-  .option('-h, --host <host>', 'GitLab host (defaults to URL origin or saved config)')
+  .option('-H, --host <host>', 'GitLab host (defaults to URL origin or saved config)')
   .option('-o, --out <path>', 'Output custom file path instead of temp preview file')
   .option('--no-open', 'Generate HTML file without automatically opening browser')
   .action(async (inputUrl, options) => {
@@ -135,6 +137,13 @@ program
         chalk.green(`MR !${parsed.mrIid} loaded successfully: `) + 
         chalk.bold(`"${mrData.mr.title}"`)
       );
+
+      if (mrData.hasOverflow) {
+        console.log(chalk.yellow('   ⚠ Warning: Some changes or files were truncated or collapsed by GitLab limits.'));
+      }
+      if (mrData.hasPartialDiscussions) {
+        console.log(chalk.yellow('   ⚠ Warning: Could not fetch all discussion comments (some comments may be missing).'));
+      }
 
       // Print quick summary stats
       console.log(
