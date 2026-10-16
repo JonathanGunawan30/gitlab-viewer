@@ -47,7 +47,7 @@ function createSanitizeOptions(baseUrl = '') {
     ],
     allowedAttributes: {
       a: ['href', 'name', 'target', 'rel'],
-      img: ['src', 'alt', 'title', 'width', 'height'],
+      img: ['src', 'alt', 'title', 'width', 'height', 'loading'],
       input: ['type', 'checked', 'disabled'],
       span: ['class', 'style'],
       div: ['class'],
@@ -56,7 +56,7 @@ function createSanitizeOptions(baseUrl = '') {
       th: ['align', 'colspan', 'rowspan'],
       td: ['align', 'colspan', 'rowspan']
     },
-    allowedSchemes: ['http', 'https', 'mailto'],
+    allowedSchemes: ['http', 'https', 'mailto', 'data'],
     allowedSchemesByTag: {
       img: ['http', 'https', 'data']
     },
@@ -77,13 +77,23 @@ function createSanitizeOptions(baseUrl = '') {
       },
       'img': (tagName, attribs) => {
         let src = (attribs.src || '').trim();
-        if (src.startsWith('/') && (projectBase || origin)) {
-          try {
-            if (src.startsWith('/uploads/') && projectBase) {
-              src = new URL(src.replace(/^\//, ''), projectBase).href;
-            } else if (origin) {
-              src = new URL(src, origin).href;
+        if (src.startsWith('data:')) {
+          return {
+            tagName: 'img',
+            attribs: {
+              ...attribs,
+              src
             }
+          };
+        }
+        if ((src.startsWith('/uploads/') || src.startsWith('uploads/')) && projectBase) {
+          try {
+            const cleanSub = src.replace(/^\/?uploads\//, 'uploads/');
+            src = new URL(cleanSub, projectBase).href;
+          } catch {}
+        } else if (src.startsWith('/') && origin) {
+          try {
+            src = new URL(src, origin).href;
           } catch {}
         }
         return {
@@ -200,9 +210,10 @@ export function calculateStats(rawDiff, changes = []) {
  * @param {string} options.rawDiff
  * @param {Array<any>} options.changes
  * @param {Array<any>} options.discussions
+ * @param {Record<string, any>} [options.imageDiffs]
  * @returns {string} Standalone HTML content
  */
-export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = [] }) {
+export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = [], imageDiffs = {} }) {
   const stats = calculateStats(rawDiff, changes);
   const baseUrl = mr.web_url || '';
   const descriptionHtml = mr.description 
@@ -890,6 +901,223 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
       color: var(--text-main);
       border-color: var(--accent-blue);
     }
+
+    /* Markdown Images Styling */
+    .markdown-body img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 6px;
+      border: 1px solid var(--border-default);
+      margin: 10px 0;
+      display: inline-block;
+      vertical-align: middle;
+      background-color: var(--bg-panel);
+    }
+
+    /* ========================================================= */
+    /* IMAGE DIFF VIEWER STYLES                                 */
+    /* ========================================================= */
+    .image-diff-wrapper {
+      padding: 16px 20px;
+      background-color: var(--bg-panel);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .image-diff-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .image-diff-badge-status {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .image-diff-badge-status.added {
+      background-color: rgba(46, 160, 67, 0.2);
+      color: #3fb950;
+      border: 1px solid rgba(46, 160, 67, 0.4);
+    }
+    .image-diff-badge-status.deleted {
+      background-color: rgba(248, 81, 73, 0.2);
+      color: #f85149;
+      border: 1px solid rgba(248, 81, 73, 0.4);
+    }
+    .image-diff-badge-status.modified {
+      background-color: rgba(210, 153, 34, 0.2);
+      color: #d29922;
+      border: 1px solid rgba(210, 153, 34, 0.4);
+    }
+
+    .image-diff-view-modes {
+      display: inline-flex;
+      border-radius: 6px;
+      border: 1px solid var(--border-default);
+      overflow: hidden;
+    }
+    .image-diff-view-btn {
+      background: var(--bg-card);
+      border: none;
+      border-right: 1px solid var(--border-default);
+      color: var(--text-muted);
+      padding: 4px 10px;
+      font-size: 11px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.15s ease;
+    }
+    .image-diff-view-btn:last-child {
+      border-right: none;
+    }
+    .image-diff-view-btn:hover {
+      background-color: var(--bg-hover);
+      color: var(--text-main);
+    }
+    .image-diff-view-btn.active {
+      background-color: var(--accent-blue-hover);
+      color: #fff;
+      font-weight: 600;
+    }
+
+    .image-diff-content {
+      width: 100%;
+    }
+
+    .image-canvas-checkerboard {
+      background-color: #0d1117;
+      background-image: 
+        linear-gradient(45deg, #161b22 25%, transparent 25%),
+        linear-gradient(-45deg, #161b22 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, #161b22 75%),
+        linear-gradient(-45deg, transparent 75%, #161b22 75%);
+      background-size: 16px 16px;
+      background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+      border: 1px solid var(--border-default);
+      border-radius: 6px;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: auto;
+      max-width: 100%;
+      min-height: 120px;
+      position: relative;
+    }
+
+    .image-diff-preview {
+      max-width: 100%;
+      max-height: 520px;
+      object-fit: contain;
+      display: block;
+      border-radius: 4px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+      cursor: zoom-in;
+      transition: transform 0.2s ease;
+    }
+    .image-diff-preview.zoomed {
+      max-height: none;
+      max-width: none;
+      cursor: zoom-out;
+    }
+    .image-diff-preview.image-deleted {
+      opacity: 0.8;
+      filter: grayscale(40%);
+    }
+
+    .image-diff-meta {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: ui-monospace, monospace;
+      margin-top: 6px;
+      text-align: center;
+    }
+
+    /* 2-Up Side-by-side */
+    .image-diff-2up {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      width: 100%;
+    }
+    @media (max-width: 768px) {
+      .image-diff-2up {
+        grid-template-columns: 1fr;
+      }
+    }
+    .image-diff-pane {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .image-pane-title {
+      font-size: 12px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    /* Swipe / Slider */
+    .image-diff-swipe-wrapper {
+      position: relative;
+      display: inline-block;
+      max-width: 100%;
+      overflow: hidden;
+      border-radius: 4px;
+    }
+    .image-diff-swipe-before {
+      position: absolute;
+      top: 0;
+      left: 0;
+      height: 100%;
+      overflow: hidden;
+      border-right: 2px solid var(--accent-blue);
+      z-index: 2;
+    }
+    .image-diff-swipe-before img,
+    .image-diff-swipe-after img {
+      max-height: 520px;
+      display: block;
+    }
+    .image-diff-slider-input {
+      width: 100%;
+      max-width: 500px;
+      margin-top: 12px;
+      cursor: ew-resize;
+      accent-color: var(--accent-blue);
+    }
+
+    /* Onion Skin */
+    .image-diff-onion-wrapper {
+      position: relative;
+      display: inline-block;
+    }
+    .image-diff-onion-after {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+    .image-diff-onion-after img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+    .image-diff-onion-slider {
+      width: 100%;
+      max-width: 500px;
+      margin-top: 12px;
+      accent-color: var(--accent-blue);
+    }
   </style>
 </head>
 <body>
@@ -1037,6 +1265,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
     (function () {
       const defaultRawDiff = ${safeJson(rawDiff)};
       const filesMeta = ${safeJson(stats.files)};
+      const imageDiffs = ${safeJson(imageDiffs || {})};
 
       let currentOutputFormat = 'side-by-side';
       let diffUiInstance = null;
@@ -1070,6 +1299,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
         diffUiInstance.highlightCode();
 
         enhanceFileHeaders();
+        renderImageDiffs();
       }
 
       function enhanceFileHeaders() {
@@ -1109,7 +1339,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
           collapseBtn.innerText = 'Collapse';
           collapseBtn.onclick = function (e) {
             e.stopPropagation();
-            const diffContent = wrapper.querySelector('.d2h-file-diff');
+            const diffContent = wrapper.querySelector('.d2h-files-diff, .d2h-file-diff');
             if (diffContent) {
               if (diffContent.style.display === 'none') {
                 diffContent.style.display = '';
@@ -1125,6 +1355,155 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
           actionContainer.appendChild(collapseBtn);
           header.appendChild(actionContainer);
         });
+      }
+
+      function renderImageDiffs() {
+        const fileWrappers = document.querySelectorAll('.d2h-file-wrapper');
+        fileWrappers.forEach((wrapper, index) => {
+          const fileMeta = filesMeta[index];
+          const fileName = fileMeta?.name;
+          if (!fileName || !imageDiffs[fileName]) return;
+
+          const imgData = imageDiffs[fileName];
+          const diffContainer = wrapper.querySelector('.d2h-files-diff, .d2h-file-diff');
+          if (!diffContainer) return;
+
+          diffContainer.innerHTML = '';
+          const imageDiffEl = createImageDiffElement(imgData, fileName);
+          diffContainer.appendChild(imageDiffEl);
+        });
+      }
+
+      function createImageDiffElement(imgData, fileName) {
+        const root = document.createElement('div');
+        root.className = 'image-diff-wrapper';
+
+        const toolbar = document.createElement('div');
+        toolbar.className = 'image-diff-toolbar';
+
+        const statusMap = {
+          'A': { label: 'Added Image', cls: 'added' },
+          'D': { label: 'Deleted Image', cls: 'deleted' },
+          'M': { label: 'Modified Image', cls: 'modified' },
+          'R': { label: 'Renamed Image', cls: 'modified' }
+        };
+        const statusInfo = statusMap[imgData.status] || { label: 'Image Diff', cls: 'modified' };
+
+        const leftMeta = document.createElement('div');
+        leftMeta.style.display = 'flex';
+        leftMeta.style.alignItems = 'center';
+        leftMeta.style.gap = '8px';
+        const safeName = (fileName || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        leftMeta.innerHTML = '<span class="image-diff-badge-status ' + statusInfo.cls + '">' + statusInfo.label + '</span><span style="font-family: ui-monospace, monospace; font-size: 12px; color: var(--text-muted);">' + safeName + '</span>';
+        toolbar.appendChild(leftMeta);
+
+        const content = document.createElement('div');
+        content.className = 'image-diff-content';
+
+        function createPreviewCard(src, labelText, isDeleted) {
+          const pane = document.createElement('div');
+          pane.className = 'image-diff-pane';
+          if (labelText) {
+            const title = document.createElement('div');
+            title.className = 'image-pane-title';
+            title.innerHTML = labelText;
+            pane.appendChild(title);
+          }
+
+          const canvas = document.createElement('div');
+          canvas.className = 'image-canvas-checkerboard';
+
+          if (src) {
+            const img = document.createElement('img');
+            img.className = 'image-diff-preview' + (isDeleted ? ' image-deleted' : '');
+            img.src = src;
+            img.alt = fileName;
+            img.title = 'Click to toggle zoom (1:1)';
+            img.onclick = () => img.classList.toggle('zoomed');
+
+            const meta = document.createElement('div');
+            meta.className = 'image-diff-meta';
+            meta.innerText = 'Calculating dimensions...';
+            img.onload = () => {
+              meta.innerText = img.naturalWidth + ' × ' + img.naturalHeight + ' px';
+            };
+
+            canvas.appendChild(img);
+            pane.appendChild(canvas);
+            pane.appendChild(meta);
+          } else {
+            canvas.innerHTML = '<span style="color: var(--text-dim); font-size: 12px;">(No image preview available)</span>';
+            pane.appendChild(canvas);
+          }
+
+          return pane;
+        }
+
+        if (imgData.status === 'A') {
+          content.appendChild(createPreviewCard(imgData.afterUrl, ''));
+        } else if (imgData.status === 'D') {
+          content.appendChild(createPreviewCard(imgData.beforeUrl, '', true));
+        } else {
+          if (imgData.beforeUrl && imgData.afterUrl) {
+            const viewModes = document.createElement('div');
+            viewModes.className = 'image-diff-view-modes';
+            viewModes.innerHTML = '<button class="image-diff-view-btn active" data-view="2up">2-Up</button><button class="image-diff-view-btn" data-view="swipe">Swipe</button><button class="image-diff-view-btn" data-view="onion">Onion Skin</button>';
+            toolbar.appendChild(viewModes);
+
+            const displayContainer = document.createElement('div');
+            content.appendChild(displayContainer);
+
+            function showView(viewType) {
+              displayContainer.innerHTML = '';
+              if (viewType === '2up') {
+                const grid = document.createElement('div');
+                grid.className = 'image-diff-2up';
+                grid.appendChild(createPreviewCard(imgData.beforeUrl, '<span class="status-D">− Before</span>', true));
+                grid.appendChild(createPreviewCard(imgData.afterUrl, '<span class="status-A">+ After</span>'));
+                displayContainer.appendChild(grid);
+              } else if (viewType === 'swipe') {
+                const swipeContainer = document.createElement('div');
+                swipeContainer.className = 'image-canvas-checkerboard';
+                swipeContainer.style.flexDirection = 'column';
+                swipeContainer.innerHTML = '<div class="image-diff-swipe-wrapper"><div class="image-diff-swipe-after"><img src="' + imgData.afterUrl + '" alt="After" /></div><div class="image-diff-swipe-before" style="width: 50%;"><img src="' + imgData.beforeUrl + '" alt="Before" /></div></div><input type="range" min="0" max="100" value="50" class="image-diff-slider-input" />';
+                const range = swipeContainer.querySelector('.image-diff-slider-input');
+                const beforePane = swipeContainer.querySelector('.image-diff-swipe-before');
+                range.oninput = () => {
+                  beforePane.style.width = range.value + '%';
+                };
+                displayContainer.appendChild(swipeContainer);
+              } else if (viewType === 'onion') {
+                const onionContainer = document.createElement('div');
+                onionContainer.className = 'image-canvas-checkerboard';
+                onionContainer.style.flexDirection = 'column';
+                onionContainer.innerHTML = '<div class="image-diff-onion-wrapper"><img src="' + imgData.beforeUrl + '" alt="Before" style="max-height: 520px; display: block;" /><div class="image-diff-onion-after" style="opacity: 0.5;"><img src="' + imgData.afterUrl + '" alt="After" /></div></div><input type="range" min="0" max="100" value="50" class="image-diff-onion-slider" />';
+                const range = onionContainer.querySelector('.image-diff-onion-slider');
+                const afterPane = onionContainer.querySelector('.image-diff-onion-after');
+                range.oninput = () => {
+                  afterPane.style.opacity = (range.value / 100);
+                };
+                displayContainer.appendChild(onionContainer);
+              }
+            }
+
+            viewModes.querySelectorAll('.image-diff-view-btn').forEach(btn => {
+              btn.onclick = () => {
+                viewModes.querySelectorAll('.image-diff-view-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                showView(btn.getAttribute('data-view'));
+              };
+            });
+
+            showView('2up');
+          } else {
+            const fallbackSrc = imgData.afterUrl || imgData.beforeUrl;
+            content.appendChild(createPreviewCard(fallbackSrc, ''));
+          }
+        }
+
+        root.appendChild(toolbar);
+        root.appendChild(content);
+        return root;
       }
 
       // Format toggling (Split vs Unified)
@@ -1239,7 +1618,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
             fileTreeItems.forEach(f => f.classList.remove('active'));
             item.classList.add('active');
             wrappers[index].scrollIntoView({ behavior: 'smooth', block: 'start' });
-            const diffContent = wrappers[index].querySelector('.d2h-file-diff');
+            const diffContent = wrappers[index].querySelector('.d2h-files-diff, .d2h-file-diff');
             if (diffContent && diffContent.style.display === 'none') {
               diffContent.style.display = '';
             }

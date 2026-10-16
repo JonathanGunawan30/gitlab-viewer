@@ -1,5 +1,7 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import axios from 'axios';
+import { calculateStats } from './generator.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
@@ -274,12 +276,226 @@ export async function fetchMergeRequestData({ host, projectEncoded, mrIid, token
     fetchAllDiscussions(client, apiBase, onProgress)
   ]);
 
+  // 3. Pre-fetch & embed markdown images in description and discussions
+  if (mrData.description) {
+    onProgress?.('Embedding images in MR description...');
+    mrData.description = await embedMarkdownImages(client, cleanHost, projectEncoded, mrData.description, onProgress);
+  }
+
+  if (Array.isArray(discussionsResult.discussions) && discussionsResult.discussions.length > 0) {
+    onProgress?.('Embedding images in discussion comments...');
+    for (const d of discussionsResult.discussions) {
+      if (Array.isArray(d.notes)) {
+        for (const n of d.notes) {
+          if (n.body) {
+            n.body = await embedMarkdownImages(client, cleanHost, projectEncoded, n.body);
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Fetch image diff previews for image files touched in MR
+  const stats = calculateStats(diffResult.rawDiff, diffResult.changes);
+  const imageDiffs = await fetchImageDiffs(client, cleanHost, projectEncoded, mrData, stats.files, onProgress);
+
   return {
     mr: mrData,
     rawDiff: diffResult.rawDiff,
     changes: diffResult.changes,
     hasOverflow: diffResult.hasOverflow,
     discussions: discussionsResult.discussions,
-    hasPartialDiscussions: discussionsResult.hasPartialDiscussions
+    hasPartialDiscussions: discussionsResult.hasPartialDiscussions,
+    imageDiffs
   };
+}
+
+export const IMAGE_MIME_TYPES = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.bmp': 'image/bmp',
+  '.avif': 'image/avif'
+};
+
+/**
+ * Checks if a file path is an image based on its extension.
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+export function isImageFile(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  const ext = path.extname(filePath.split('?')[0]).toLowerCase();
+  return Boolean(IMAGE_MIME_TYPES[ext]);
+}
+
+/**
+ * Fetches raw content of a repository file as a Base64 data URI.
+ * @param {import('axios').AxiosInstance} client
+ * @param {string} cleanHost
+ * @param {string | number} projectId
+ * @param {string} filePath
+ * @param {string} ref
+ * @returns {Promise<string | null>}
+ */
+export async function fetchRawFile(client, cleanHost, projectId, filePath, ref) {
+  if (!filePath || filePath === '/dev/null' || !ref) return null;
+  try {
+    const cleanPath = filePath.replace(/^\.?\//, '');
+    const encodedPath = encodeURIComponent(cleanPath).replace(/\./g, '%2E');
+    const url = `${cleanHost}/api/v4/projects/${projectId}/repository/files/${encodedPath}/raw`;
+    const res = await client.get(url, {
+      params: { ref },
+      responseType: 'arraybuffer',
+      timeout: 15000,
+      maxContentLength: 15 * 1024 * 1024
+    });
+    const ext = path.extname(cleanPath.split('?')[0]).toLowerCase();
+    const contentType = res.headers?.['content-type'] || IMAGE_MIME_TYPES[ext] || 'image/png';
+    const base64 = Buffer.from(res.data).toString('base64');
+    return `data:${contentType};base64,${base64}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetches before/after previews for all image files changed in MR.
+ * @param {import('axios').AxiosInstance} client
+ * @param {string} cleanHost
+ * @param {string} projectEncoded
+ * @param {object} mrData
+ * @param {Array<any>} files
+ * @param {function} [onProgress]
+ * @returns {Promise<Record<string, any>>}
+ */
+export async function fetchImageDiffs(client, cleanHost, projectEncoded, mrData, files = [], onProgress) {
+  const imageFiles = files.filter(f => isImageFile(f.name));
+  if (imageFiles.length === 0) return {};
+
+  const headRef = mrData?.diff_refs?.head_sha || mrData?.sha || mrData?.source_branch;
+  const baseRef = mrData?.diff_refs?.base_sha || mrData?.target_branch;
+  const sourceProject = mrData?.source_project_id || projectEncoded;
+  const targetProject = mrData?.target_project_id || projectEncoded;
+
+  const imageDiffs = {};
+  const maxImages = 40;
+  const toProcess = imageFiles.slice(0, maxImages);
+
+  for (let i = 0; i < toProcess.length; i++) {
+    const file = toProcess[i];
+    onProgress?.(`Fetching image preview (${i + 1}/${toProcess.length}): ${file.name}...`);
+
+    let beforeUrl = null;
+    let afterUrl = null;
+
+    if (file.status === 'A') {
+      afterUrl = await fetchRawFile(client, cleanHost, sourceProject, file.newName || file.name, headRef);
+    } else if (file.status === 'D') {
+      beforeUrl = await fetchRawFile(client, cleanHost, targetProject, file.oldName || file.name, baseRef);
+    } else {
+      [beforeUrl, afterUrl] = await Promise.all([
+        fetchRawFile(client, cleanHost, targetProject, file.oldName || file.name, baseRef),
+        fetchRawFile(client, cleanHost, sourceProject, file.newName || file.name, headRef)
+      ]);
+    }
+
+    imageDiffs[file.name] = {
+      name: file.name,
+      status: file.status,
+      oldName: file.oldName,
+      newName: file.newName,
+      beforeUrl,
+      afterUrl
+    };
+  }
+
+  return imageDiffs;
+}
+
+/**
+ * Parses markdown text, downloads referenced images using the authenticated GitLab client,
+ * and inlines them as Base64 data URIs so they display offline and on private repositories.
+ * 
+ * @param {import('axios').AxiosInstance} client
+ * @param {string} cleanHost
+ * @param {string} projectEncoded
+ * @param {string} markdownText
+ * @param {function} [onProgress]
+ * @returns {Promise<string>}
+ */
+export async function embedMarkdownImages(client, cleanHost, projectEncoded, markdownText, onProgress) {
+  if (!markdownText || typeof markdownText !== 'string') return markdownText;
+
+  const mdRegex = /!\[(.*?)\]\(\s*<?([^\s\)>]+)>?(?:\s+["'][^"']*?["'])?\s*\)/g;
+  const htmlRegex = /<img\s+[^>]*?src=["']([^"']+)["'][^>]*>/gi;
+
+  const foundUrls = new Set();
+  let match;
+  while ((match = mdRegex.exec(markdownText)) !== null) {
+    if (match[2] && !match[2].startsWith('data:')) {
+      foundUrls.add(match[2].trim());
+    }
+  }
+  while ((match = htmlRegex.exec(markdownText)) !== null) {
+    if (match[1] && !match[1].startsWith('data:')) {
+      foundUrls.add(match[1].trim());
+    }
+  }
+
+  if (foundUrls.size === 0) return markdownText;
+
+  const projectPath = decodeURIComponent(projectEncoded);
+  const cache = new Map();
+
+  for (const rawUrl of foundUrls) {
+    let resolvedUrl = rawUrl;
+    let isGitLabHost = false;
+
+    if (resolvedUrl.startsWith('http://') || resolvedUrl.startsWith('https://')) {
+      isGitLabHost = resolvedUrl.startsWith(cleanHost);
+    } else if (resolvedUrl.startsWith('/uploads/') || resolvedUrl.startsWith('uploads/')) {
+      const cleanSub = resolvedUrl.replace(/^\/?uploads\//, '');
+      resolvedUrl = `${cleanHost}/${projectPath}/uploads/${cleanSub}`;
+      isGitLabHost = true;
+    } else if (resolvedUrl.startsWith('/')) {
+      resolvedUrl = `${cleanHost}${resolvedUrl}`;
+      isGitLabHost = true;
+    } else {
+      resolvedUrl = `${cleanHost}/${projectPath}/${resolvedUrl}`;
+      isGitLabHost = true;
+    }
+
+    try {
+      const getOptions = {
+        responseType: 'arraybuffer',
+        timeout: 10000,
+        maxContentLength: 10 * 1024 * 1024
+      };
+      if (!isGitLabHost) {
+        getOptions.headers = { 'PRIVATE-TOKEN': undefined };
+      }
+
+      const res = await client.get(resolvedUrl, getOptions);
+      const ext = path.extname(resolvedUrl.split('?')[0]).toLowerCase();
+      const contentType = res.headers?.['content-type'] || IMAGE_MIME_TYPES[ext] || 'image/png';
+      const base64 = Buffer.from(res.data).toString('base64');
+      const dataUri = `data:${contentType};base64,${base64}`;
+      cache.set(rawUrl, dataUri);
+    } catch {
+      // Ignore failures
+    }
+  }
+
+  if (cache.size === 0) return markdownText;
+
+  let result = markdownText;
+  for (const [rawUrl, dataUri] of cache.entries()) {
+    result = result.split(rawUrl).join(dataUri);
+  }
+  return result;
 }

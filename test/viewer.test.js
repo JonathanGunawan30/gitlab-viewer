@@ -2,7 +2,15 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderMarkdown, calculateStats, generateViewerHtml } from '../src/generator.js';
 import { parseGitLabInput } from '../src/parser.js';
-import { convertChangesToUnifiedDiff, fetchDiffsData, fetchAllDiscussions } from '../src/gitlab.js';
+import {
+  convertChangesToUnifiedDiff,
+  fetchDiffsData,
+  fetchAllDiscussions,
+  isImageFile,
+  fetchRawFile,
+  fetchImageDiffs,
+  embedMarkdownImages
+} from '../src/gitlab.js';
 
 describe('Markdown Sanitization & XSS Prevention', () => {
   test('strips dangerous <script> tags from markdown', () => {
@@ -31,6 +39,18 @@ describe('Markdown Sanitization & XSS Prevention', () => {
     const md = '![Screenshot](/uploads/abcd1234ef/image.png)';
     const clean = renderMarkdown(md, 'https://gitlab.example.com/org/project/-/merge_requests/42');
     assert.match(clean, /src="https:\/\/gitlab\.example\.com\/org\/project\/uploads\/abcd1234ef\/image\.png"/);
+  });
+
+  test('resolves relative uploads/ without leading slash to absolute GitLab URL', () => {
+    const md = '![Screenshot](uploads/abcd1234ef/image.png)';
+    const clean = renderMarkdown(md, 'https://gitlab.example.com/org/project/-/merge_requests/42');
+    assert.match(clean, /src="https:\/\/gitlab\.example\.com\/org\/project\/uploads\/abcd1234ef\/image\.png"/);
+  });
+
+  test('preserves data: image URIs in rendered markdown', () => {
+    const md = '![Embedded](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=)';
+    const clean = renderMarkdown(md);
+    assert.match(clean, /src="data:image\/png;base64,/);
   });
 
   test('forces rel="noopener noreferrer" and target="_blank" on links', () => {
@@ -239,3 +259,141 @@ describe('GitLab API Client & Pagination', () => {
     assert.equal(res.hasPartialDiscussions, true);
   });
 });
+
+describe('Image Diffs & Asset Embedding', () => {
+  test('isImageFile correctly identifies image formats', () => {
+    assert.equal(isImageFile('logo.png'), true);
+    assert.equal(isImageFile('photo.JPG'), true);
+    assert.equal(isImageFile('banner.jpeg'), true);
+    assert.equal(isImageFile('anim.gif'), true);
+    assert.equal(isImageFile('image.webp'), true);
+    assert.equal(isImageFile('icon.svg'), true);
+    assert.equal(isImageFile('favicon.ico'), true);
+    assert.equal(isImageFile('path/to/nested/asset.png?v=123'), true);
+
+    assert.equal(isImageFile('index.js'), false);
+    assert.equal(isImageFile('style.css'), false);
+    assert.equal(isImageFile('README.md'), false);
+    assert.equal(isImageFile(''), false);
+    assert.equal(isImageFile(null), false);
+  });
+
+  test('fetchRawFile retrieves repository file and converts to data URI', async () => {
+    const mockClient = {
+      get: async (url, opts) => {
+        assert.match(url, /\/repository\/files\/public%2Fimage%2Epng\/raw/);
+        assert.equal(opts.params.ref, 'main');
+        return {
+          data: Buffer.from('fake-png-binary-content'),
+          headers: { 'content-type': 'image/png' }
+        };
+      }
+    };
+
+    const dataUri = await fetchRawFile(mockClient, 'https://gitlab.com', 'group%2Frepo', 'public/image.png', 'main');
+    assert.match(dataUri, /^data:image\/png;base64,/);
+    assert.equal(Buffer.from(dataUri.split(',')[1], 'base64').toString(), 'fake-png-binary-content');
+  });
+
+  test('fetchRawFile returns null when ref is missing or path is /dev/null', async () => {
+    const resNullPath = await fetchRawFile({}, 'https://gitlab.com', '1', '/dev/null', 'main');
+    assert.equal(resNullPath, null);
+
+    const resNoRef = await fetchRawFile({}, 'https://gitlab.com', '1', 'logo.png', '');
+    assert.equal(resNoRef, null);
+  });
+
+  test('fetchImageDiffs fetches before and after previews based on status', async () => {
+    const mockClient = {
+      get: async (url, opts) => {
+        if (url.includes('new-logo%2Epng')) {
+          return {
+            data: Buffer.from('new-image-bytes'),
+            headers: { 'content-type': 'image/png' }
+          };
+        }
+        if (url.includes('old-icon%2Epng')) {
+          return {
+            data: Buffer.from('old-image-bytes'),
+            headers: { 'content-type': 'image/png' }
+          };
+        }
+        throw new Error('Unexpected URL: ' + url);
+      }
+    };
+
+    const mrData = {
+      diff_refs: { head_sha: 'head123', base_sha: 'base123' },
+      source_project_id: 10,
+      target_project_id: 10
+    };
+
+    const files = [
+      { name: 'new-logo.png', status: 'A', oldName: '/dev/null', newName: 'new-logo.png' },
+      { name: 'old-icon.png', status: 'D', oldName: 'old-icon.png', newName: '/dev/null' },
+      { name: 'app.js', status: 'M', oldName: 'app.js', newName: 'app.js' }
+    ];
+
+    const diffs = await fetchImageDiffs(mockClient, 'https://gitlab.com', '10', mrData, files);
+    assert.ok(diffs['new-logo.png']);
+    assert.equal(diffs['new-logo.png'].status, 'A');
+    assert.match(diffs['new-logo.png'].afterUrl, /^data:image\/png;base64,/);
+    assert.equal(diffs['new-logo.png'].beforeUrl, null);
+
+    assert.ok(diffs['old-icon.png']);
+    assert.equal(diffs['old-icon.png'].status, 'D');
+    assert.match(diffs['old-icon.png'].beforeUrl, /^data:image\/png;base64,/);
+    assert.equal(diffs['old-icon.png'].afterUrl, null);
+
+    assert.equal(diffs['app.js'], undefined);
+  });
+
+  test('embedMarkdownImages inlines image URLs as Base64 data URIs', async () => {
+    const mockClient = {
+      get: async (url) => {
+        if (url.includes('test-upload.png')) {
+          return {
+            data: Buffer.from('fake-upload-bytes'),
+            headers: { 'content-type': 'image/png' }
+          };
+        }
+        throw new Error('Unexpected URL: ' + url);
+      }
+    };
+
+    const markdown = 'Here is a screenshot:\n![My Screenshot](/uploads/abc1234/test-upload.png)\nand inline <img src="/uploads/abc1234/test-upload.png" width="300" />';
+    const embedded = await embedMarkdownImages(mockClient, 'https://gitlab.com', 'group%2Fproject', markdown);
+
+    assert.match(embedded, /!\[My Screenshot\]\(data:image\/png;base64,/);
+    assert.match(embedded, /<img src="data:image\/png;base64,/);
+    assert.doesNotMatch(embedded, /\/uploads\/abc1234\/test-upload\.png/);
+  });
+
+  test('generateViewerHtml renders imageDiffs and image-canvas-checkerboard elements', () => {
+    const html = generateViewerHtml({
+      mr: {
+        iid: 10,
+        title: 'Add Assets',
+        source_branch: 'feat/assets',
+        target_branch: 'main',
+        description: 'Updated illustrations'
+      },
+      rawDiff: 'diff --git a/logo.png b/logo.png\nnew file mode 100644\nBinary files /dev/null and b/logo.png differ\n',
+      changes: [{ new_file: true, new_path: 'logo.png', old_path: '/dev/null' }],
+      discussions: [],
+      imageDiffs: {
+        'logo.png': {
+          name: 'logo.png',
+          status: 'A',
+          beforeUrl: null,
+          afterUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+        }
+      }
+    });
+
+    assert.match(html, /image-canvas-checkerboard/);
+    assert.match(html, /renderImageDiffs/);
+    assert.match(html, /imageDiffs/);
+  });
+});
+
