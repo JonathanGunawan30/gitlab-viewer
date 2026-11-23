@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { renderMarkdown, calculateStats, generateViewerHtml } from '../src/generator.js';
+import { renderMarkdown, calculateStats, generateViewerHtml, resolveMergeabilityStatus } from '../src/generator.js';
 import { parseGitLabInput } from '../src/parser.js';
 import {
   convertChangesToUnifiedDiff,
@@ -172,6 +172,160 @@ index 1111111..2222222 100644
     assert.match(html, /badge-status badge-draft/);
     assert.match(html, /DRAFT/);
     assert.match(html, /Content-Security-Policy/);
+  });
+
+  test('renders Mergeable badge for open MR with detailed_merge_status=mergeable', () => {
+    const html = generateViewerHtml({
+      mr: {
+        iid: 12,
+        title: 'Ready Feature',
+        state: 'opened',
+        detailed_merge_status: 'mergeable',
+        merge_status: 'can_be_merged',
+        source_branch: 'feat/ready',
+        target_branch: 'main'
+      },
+      rawDiff: '',
+      changes: [],
+      discussions: []
+    });
+
+    assert.match(html, /badge-mergeability badge-merge-mergeable/);
+    assert.match(html, /data-merge-status="mergeable"/);
+    assert.match(html, /Mergeable/);
+  });
+
+  test('renders blocked reason badge for open MR with conflicts or unresolved discussions', () => {
+    const conflictHtml = generateViewerHtml({
+      mr: {
+        iid: 13,
+        title: 'Conflicting Feature',
+        state: 'opened',
+        detailed_merge_status: 'conflict',
+        has_conflicts: true,
+        source_branch: 'feat/conflict',
+        target_branch: 'main'
+      },
+      rawDiff: '',
+      changes: [],
+      discussions: []
+    });
+
+    assert.match(conflictHtml, /badge-mergeability badge-merge-blocked/);
+    assert.match(conflictHtml, /data-merge-status="conflict"/);
+    assert.match(conflictHtml, /Merge Conflicts/);
+
+    const discussionsHtml = generateViewerHtml({
+      mr: {
+        iid: 14,
+        title: 'Pending Discussion Feature',
+        state: 'opened',
+        detailed_merge_status: 'discussions_not_resolved',
+        blocking_discussions_resolved: false,
+        source_branch: 'feat/disc',
+        target_branch: 'main'
+      },
+      rawDiff: '',
+      changes: [],
+      discussions: []
+    });
+
+    assert.match(discussionsHtml, /badge-mergeability badge-merge-warning/);
+    assert.match(discussionsHtml, /data-merge-status="discussions_not_resolved"/);
+    assert.match(discussionsHtml, /Unresolved Discussions/);
+  });
+
+  test('does not render mergeability badge for merged, closed, or locked MRs', () => {
+    for (const state of ['merged', 'closed', 'locked']) {
+      const html = generateViewerHtml({
+        mr: {
+          iid: 15,
+          title: `MR in ${state}`,
+          state,
+          detailed_merge_status: 'mergeable',
+          merge_status: 'can_be_merged',
+          source_branch: 'feat/x',
+          target_branch: 'main'
+        },
+        rawDiff: '',
+        changes: [],
+        discussions: []
+      });
+
+      assert.doesNotMatch(html, /<span class="badge-mergeability/);
+    }
+  });
+});
+
+describe('resolveMergeabilityStatus', () => {
+  test('supports detailed_merge_status values and legacy merge_status fallbacks', () => {
+    assert.deepEqual(
+      resolveMergeabilityStatus({ state: 'opened', detailed_merge_status: 'ci_must_pass' }),
+      {
+        status: 'ci_must_pass',
+        tone: 'blocked',
+        label: 'Pipeline Must Pass',
+        title: 'CI/CD pipeline must succeed before merging'
+      }
+    );
+
+    assert.deepEqual(
+      resolveMergeabilityStatus({ state: 'opened', detailed_merge_status: 'ci_still_running' }),
+      {
+        status: 'ci_still_running',
+        tone: 'checking',
+        label: 'Pipeline Running',
+        title: 'CI/CD pipeline is still running'
+      }
+    );
+
+    assert.deepEqual(
+      resolveMergeabilityStatus({ state: 'opened', detailed_merge_status: 'not_approved' }),
+      {
+        status: 'not_approved',
+        tone: 'warning',
+        label: 'Approvals Required',
+        title: 'Required approvals have not been met'
+      }
+    );
+
+    assert.deepEqual(
+      resolveMergeabilityStatus({ state: 'opened', detailed_merge_status: 'checking' }),
+      {
+        status: 'checking',
+        tone: 'checking',
+        label: 'Checking Mergeability',
+        title: 'GitLab is checking whether this merge request can be merged'
+      }
+    );
+
+    assert.equal(
+      resolveMergeabilityStatus({ state: 'opened', merge_status: 'can_be_merged' })?.tone,
+      'mergeable'
+    );
+
+    assert.equal(
+      resolveMergeabilityStatus({ state: 'opened', draft: true, merge_status: 'can_be_merged' })?.status,
+      'draft_status'
+    );
+
+    assert.equal(
+      resolveMergeabilityStatus({ state: 'opened', merge_status: 'cannot_be_merged', has_conflicts: true })?.status,
+      'conflict'
+    );
+
+    assert.equal(
+      resolveMergeabilityStatus({ state: 'opened', detailed_merge_status: 'mergeable', blocking_discussions_resolved: false })?.status,
+      'discussions_not_resolved'
+    );
+
+    assert.equal(
+      resolveMergeabilityStatus({ state: 'opened', detailed_merge_status: 'custom_policy_gate' })?.label,
+      'Blocked: Custom Policy Gate'
+    );
+
+    assert.equal(resolveMergeabilityStatus({ state: 'opened' }), null);
+    assert.equal(resolveMergeabilityStatus({ state: 'merged', detailed_merge_status: 'mergeable' }), null);
   });
 });
 
