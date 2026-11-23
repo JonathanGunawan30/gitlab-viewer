@@ -202,6 +202,192 @@ export function calculateStats(rawDiff, changes = []) {
   };
 }
 
+const DETAILED_MERGE_STATUS_MAP = {
+  mergeable: {
+    tone: 'mergeable',
+    label: 'Mergeable',
+    title: 'This merge request can be merged'
+  },
+  unchecked: {
+    tone: 'checking',
+    label: 'Checking Mergeability',
+    title: 'GitLab is checking whether this merge request can be merged'
+  },
+  checking: {
+    tone: 'checking',
+    label: 'Checking Mergeability',
+    title: 'GitLab is checking whether this merge request can be merged'
+  },
+  conflict: {
+    tone: 'blocked',
+    label: 'Merge Conflicts',
+    title: 'This merge request has merge conflicts that must be resolved'
+  },
+  discussions_not_resolved: {
+    tone: 'warning',
+    label: 'Unresolved Discussions',
+    title: 'All discussions must be resolved before merging'
+  },
+  ci_must_pass: {
+    tone: 'blocked',
+    label: 'Pipeline Must Pass',
+    title: 'CI/CD pipeline must succeed before merging'
+  },
+  ci_still_running: {
+    tone: 'checking',
+    label: 'Pipeline Running',
+    title: 'CI/CD pipeline is still running'
+  },
+  draft_status: {
+    tone: 'warning',
+    label: 'Blocked: Draft',
+    title: 'Remove draft status before merging'
+  },
+  not_approved: {
+    tone: 'warning',
+    label: 'Approvals Required',
+    title: 'Required approvals have not been met'
+  },
+  requested_changes: {
+    tone: 'blocked',
+    label: 'Changes Requested',
+    title: 'Changes have been requested by a reviewer'
+  },
+  need_rebase: {
+    tone: 'warning',
+    label: 'Needs Rebase',
+    title: 'Source branch must be rebased before merging'
+  },
+  approvals_syncing: {
+    tone: 'checking',
+    label: 'Syncing Approvals',
+    title: 'Approvals are currently syncing'
+  },
+  blocked_status: {
+    tone: 'blocked',
+    label: 'Blocked by Dependency',
+    title: 'Blocked by another merge request'
+  },
+  commits_status: {
+    tone: 'blocked',
+    label: 'No Commits',
+    title: 'Source branch has no commits to merge'
+  },
+  external_status_checks: {
+    tone: 'warning',
+    label: 'Status Checks Pending',
+    title: 'External status checks must pass before merging'
+  },
+  security_policy_violations: {
+    tone: 'blocked',
+    label: 'Policy Violations',
+    title: 'Blocked by security policy violations'
+  },
+  security_policy_evaluation: {
+    tone: 'checking',
+    label: 'Evaluating Policies',
+    title: 'Security policies are being evaluated'
+  },
+  merge_time: {
+    tone: 'warning',
+    label: 'Merge Scheduled',
+    title: 'Merge is blocked until the scheduled merge time'
+  },
+  jira_association_missing: {
+    tone: 'warning',
+    label: 'Jira Issue Required',
+    title: 'A Jira issue association is required before merging'
+  },
+  broken_status: {
+    tone: 'blocked',
+    label: 'Not Mergeable',
+    title: 'This merge request cannot be merged'
+  },
+  cannot_be_merged: {
+    tone: 'blocked',
+    label: 'Not Mergeable',
+    title: 'This merge request cannot be merged'
+  },
+  cannot_be_merged_recheck: {
+    tone: 'blocked',
+    label: 'Not Mergeable',
+    title: 'This merge request cannot be merged (rechecking)'
+  }
+};
+
+const GENERIC_OR_OPTIMISTIC_STATUSES = new Set([
+  '',
+  'mergeable',
+  'broken_status',
+  'cannot_be_merged',
+  'cannot_be_merged_recheck'
+]);
+
+/**
+ * Resolves display metadata for an open Merge Request's mergeability status.
+ * Returns null for non-open MRs or when no mergeability fields are present.
+ *
+ * @param {any} mr
+ * @returns {{ status: string, tone: string, label: string, title: string } | null}
+ */
+export function resolveMergeabilityStatus(mr) {
+  if (!mr || (mr.state && mr.state !== 'opened')) return null;
+
+  const detail = typeof mr.detailed_merge_status === 'string' ? mr.detailed_merge_status.trim() : '';
+  const legacy = typeof mr.merge_status === 'string' ? mr.merge_status.trim() : '';
+  const hasConflicts = mr.has_conflicts === true;
+  const hasUnresolvedDiscussions = mr.blocking_discussions_resolved === false;
+  const isDraft = Boolean(mr.draft || mr.work_in_progress);
+
+  if (detail === 'not_open') return null;
+  if (!detail && !legacy && !hasConflicts && !hasUnresolvedDiscussions) return null;
+
+  if (hasConflicts) {
+    return { status: 'conflict', ...DETAILED_MERGE_STATUS_MAP.conflict };
+  }
+
+  if (hasUnresolvedDiscussions && GENERIC_OR_OPTIMISTIC_STATUSES.has(detail)) {
+    return { status: 'discussions_not_resolved', ...DETAILED_MERGE_STATUS_MAP.discussions_not_resolved };
+  }
+
+  if (detail) {
+    const mapped = DETAILED_MERGE_STATUS_MAP[detail];
+    if (mapped) {
+      return { status: detail, ...mapped };
+    }
+    const formatted = detail
+      .split('_')
+      .filter(Boolean)
+      .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(' ');
+    return {
+      status: detail,
+      tone: 'warning',
+      label: `Blocked: ${formatted}`,
+      title: `Merge status: ${detail}`
+    };
+  }
+
+  if (legacy === 'can_be_merged') {
+    if (isDraft) {
+      return { status: 'draft_status', ...DETAILED_MERGE_STATUS_MAP.draft_status };
+    }
+    return { status: 'can_be_merged', ...DETAILED_MERGE_STATUS_MAP.mergeable };
+  }
+
+  const mappedLegacy = DETAILED_MERGE_STATUS_MAP[legacy];
+  if (mappedLegacy) {
+    return { status: legacy, ...mappedLegacy };
+  }
+
+  return {
+    status: legacy,
+    tone: 'warning',
+    label: `Merge Status: ${legacy}`,
+    title: `Merge status: ${legacy}`
+  };
+}
+
 /**
  * Generates the complete, self-contained standalone HTML viewer.
  * 
@@ -248,6 +434,17 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
     locked: 'LOCKED'
   };
   const badgeLabel = isDraft ? 'DRAFT' : (badgeLabels[mr.state] || (mr.state || 'OPEN').toUpperCase());
+
+  const mergeability = resolveMergeabilityStatus(mr);
+  const mergeabilityIcons = {
+    mergeable: '✓',
+    blocked: '✕',
+    warning: '!',
+    checking: '◌'
+  };
+  const mergeabilityBadgeHtml = mergeability
+    ? `<span class="badge-mergeability badge-merge-${escapeHtml(mergeability.tone)}" data-merge-status="${escapeHtml(mergeability.status)}" title="${escapeHtml(mergeability.title)}">${mergeabilityIcons[mergeability.tone] || ''} ${escapeHtml(mergeability.label)}</span>`
+    : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -374,12 +571,46 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
       text-transform: uppercase;
       letter-spacing: 0.5px;
       white-space: nowrap;
+      flex-shrink: 0;
     }
     .badge-opened { background-color: #238636; color: #fff; }
     .badge-merged { background-color: #8957e5; color: #fff; }
     .badge-closed { background-color: #da3633; color: #fff; }
     .badge-locked { background-color: #d29922; color: #fff; }
     .badge-draft { background-color: #484f58; color: #8b949e; }
+
+    .badge-mergeability {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 9px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+      border: 1px solid transparent;
+      flex-shrink: 0;
+    }
+    .badge-merge-mergeable {
+      background-color: rgba(46, 160, 67, 0.15);
+      color: #3fb950;
+      border-color: rgba(46, 160, 67, 0.4);
+    }
+    .badge-merge-blocked {
+      background-color: rgba(248, 81, 73, 0.15);
+      color: #f85149;
+      border-color: rgba(248, 81, 73, 0.4);
+    }
+    .badge-merge-warning {
+      background-color: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+      border-color: rgba(210, 153, 34, 0.4);
+    }
+    .badge-merge-checking {
+      background-color: rgba(88, 166, 255, 0.15);
+      color: #58a6ff;
+      border-color: rgba(88, 166, 255, 0.4);
+    }
 
     .mr-title {
       font-size: 16px;
@@ -1126,6 +1357,7 @@ export function generateViewerHtml({ mr, rawDiff, changes = [], discussions = []
     <div class="top-bar-row1">
       <div class="mr-title-area">
         <span class="badge-status badge-${badgeClass}">${badgeLabel}</span>
+        ${mergeabilityBadgeHtml}
         <h1 class="mr-title">
           <span class="mr-iid">!${mr.iid}</span>${escapeHtml(mr.title)}
         </h1>
